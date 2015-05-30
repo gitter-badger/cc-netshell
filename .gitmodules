@@ -1,0 +1,3 @@
+[submodule "framebuffer"]
+	path = framebuffer
+	url = https://github.com/lupus590/framebuffer.git
