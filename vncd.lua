@@ -2,6 +2,45 @@ local args = {...}
 
 local connections = {}
 
+local nshAPI = {
+	connList = connections
+}
+
+nshAPI.getRemoteID = function()
+	return false
+end
+
+nshAPI.send = function(msg)
+	return false
+end
+
+nshAPI.receive = function(timeout)
+	return false
+end
+
+nshAPI.getClientCapabilities = function()
+	return false
+end
+
+nshAPI.getRemoteConnections = function()
+	local remotes = {}
+	for cNum, cInfo in pairs(nshAPI.connList) do
+		table.insert(remotes, cNum)
+		if cInfo.outbound then
+			table.insert(remotes, cInfo.outbound)
+		end
+	end
+	return remotes
+end
+
+nshAPI.packFile = function(path)
+	return false
+end
+
+nshAPI.unpackAndSaveFile = function(path, data)
+	return false
+end
+
 local packetConversion = {
 	query = "SQ",
 	response = "SR",
@@ -31,14 +70,20 @@ end
 
 local function send(id, pType, message)
 	if pType and message then
-		return rednet.send(id, packetConversion[pType]..":;"..message)
+		if term.current then
+			return rednet.send(id, packetConversion[pType]..":;"..message, "tror")
+		else
+			return rednet.send(id, packetConversion[pType]..":;"..message)
+		end
 	end
 end
 
 local function resumeThread(co, event)
 	if not co.filter or event[1] == co.filter then
 		co.filter = nil
+		local _old = term.redirect(co.target)
 		local passback = {coroutine.resume(co.thread, unpack(event))}
+		if _old then term.redirect(_old) else term.restore() end
 		if passback[1] and passback[2] then
 			co.filter = passback[2]
 		end
@@ -53,51 +98,40 @@ local function resumeThread(co, event)
 				send(cNum, "textTable", textutils.serialize(co.target.buffer))
 			end
 		end
+		framebuffer.draw(co.target.buffer)
 	end
 end
 
 if not openModem() then error("No modem present!") end
 
-if not framebuffer then if not os.loadAPI(shell.resolveProgram("framebuffer")) then error("Could not load framebuffer API") end end
+local bufferDirs = {"/","/LyqydOS/","/usr/apis/","/disk/"}
 
-local redirect, native = {}
-
-if term.current then
-	--we are using cc 1.6+.
-	native = term.native()
-else
-	native = term.native
-end
-native.clear()
-native.setCursorPos(1,1)
-local x, y = native.getSize()
-
-local _redirect = framebuffer.new(x, y, native.isColor())
-for k, v in pairs(_redirect) do
-	if type(k) == "string" and type(v) == "function" then
-		redirect[k] = function(...)
-			_redirect[k](...)
-			return native[k](...)
+if not framebuffer then
+	for i = 1, #bufferDirs do
+		if fs.exists(bufferDirs[i].."framebuffer") and os.loadAPI(bufferDirs[i].."framebuffer") then
+			break
 		end
-	else
-		redirect[k] = _redirect[k]
 	end
 end
-
-term.redirect(redirect)
-if term.current then
-	--1.6+
-	term.native = function() return redirect end
-else
-	term.native = redirect
+if not framebuffer then
+	print("Couldn't find framebuffer API!")
+	return
 end
 
-local shellRoutine = coroutine.create(function() shell.run("/rom/programs/shell", unpack(args)) end)
-coroutine.resume(shellRoutine)
+term.clear()
+term.setCursorPos(1,1)
+local x, y = term.getSize()
 
+local redirect = framebuffer.new(x, y, term.isColor())
+
+local shellRoutine = coroutine.create(function() shell.run("/rom/programs/shell", unpack(args)) end)
 local co = {thread = shellRoutine, target = redirect}
 
-while true do
+resumeThread(co, {})
+
+_G.nsh = nshAPI
+
+while coroutine.status(co.thread) ~= "dead" do
 	event = {os.pullEventRaw()}
 	if event[1] == "rednet_message" then
 		if packetConversion[string.sub(event[3], 1, 2)] then
@@ -131,8 +165,15 @@ while true do
 			--rednet message, but not in the correct format, so pass to all shells.
 			resumeThread(co, event)
 		end
+	elseif event[1] == "terminate" then
+		break
 	else
 		--dispatch all other events to all shells
 		resumeThread(co, event)
 	end
 end
+
+for cNum, cInfo in pairs(connections) do
+	send(cNum, "close", "disconnect")
+end
+_G.nsh = nil
